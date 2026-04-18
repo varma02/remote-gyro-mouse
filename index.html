@@ -135,19 +135,50 @@
         display: block;
       }
 
-      .debug {
+      .settings-btn {
         position: fixed;
         top: 52px;
-        left: 12px;
-        background: rgba(12, 15, 22, 0.75);
+        right: 12px;
+        background: rgba(20, 25, 37, 0.7);
         border: 1px solid rgba(255, 255, 255, 0.08);
-        color: var(--muted);
-        padding: 10px 12px;
-        border-radius: 12px;
+        color: var(--text);
+        padding: 8px 12px;
+        border-radius: 14px;
         font-size: 12px;
         z-index: 6;
-        min-width: 220px;
-        white-space: pre-line;
+      }
+
+      .settings {
+        position: fixed;
+        top: 96px;
+        right: 12px;
+        width: 220px;
+        background: rgba(12, 15, 22, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 12px;
+        color: var(--text);
+        font-size: 12px;
+        z-index: 6;
+        display: none;
+      }
+
+      .settings.open {
+        display: block;
+      }
+
+      .settings label {
+        display: block;
+        margin-bottom: 10px;
+      }
+
+      .settings input[type="range"] {
+        width: 100%;
+      }
+
+      .settings .value {
+        float: right;
+        color: var(--muted);
       }
     </style>
   </head>
@@ -157,10 +188,22 @@
       <span id="status-text">Disconnected</span>
     </div>
     <button class="gyro" id="gyro">Enable gyro</button>
+    <button class="settings-btn" id="settings-btn">Settings</button>
+    <div class="settings" id="settings">
+      <label>
+        Mouse sensitivity
+        <span class="value" id="mouse-value"></span>
+        <input id="mouse-sens" type="range" min="1" max="30" step="0.5" />
+      </label>
+      <label>
+        Scroll sensitivity
+        <span class="value" id="scroll-value"></span>
+        <input id="scroll-sens" type="range" min="0.1" max="3" step="0.1" />
+      </label>
+    </div>
     <div class="track" id="track">
       <div class="hint">Drag to move • Up/Down drag scrolls • Tap to click</div>
     </div>
-    <div class="debug" id="debug">Motion: waiting…</div>
     <div class="toast" id="toast"></div>
     <script>
       const statusEl = document.getElementById("status");
@@ -168,7 +211,12 @@
       const track = document.getElementById("track");
       const gyroBtn = document.getElementById("gyro");
       const toast = document.getElementById("toast");
-      const debugEl = document.getElementById("debug");
+      const settingsBtn = document.getElementById("settings-btn");
+      const settingsPanel = document.getElementById("settings");
+      const mouseSensInput = document.getElementById("mouse-sens");
+      const scrollSensInput = document.getElementById("scroll-sens");
+      const mouseValue = document.getElementById("mouse-value");
+      const scrollValue = document.getElementById("scroll-value");
 
       let socket;
       let lastX = null;
@@ -177,6 +225,7 @@
       let pendingDx = 0;
       let pendingDy = 0;
       let pendingScroll = 0;
+      let touchActive = false;
       let gyroEnabled = false;
       let gyroSeen = false;
       let gyroWatchdog = null;
@@ -186,12 +235,12 @@
       let biasX = 0;
       let biasY = 0;
       let biasCount = 0;
-      const scrollScale = 0.4;
+      let scrollScale = 0.4;
       const moveScale = 2;
-      const gyroGain = 5.0;
+      let gyroGain = 10.0;
       const gyroMax = 60;
       const gyroDeadzone = 0.8;
-      const gyroSmoothing = 0.3;
+      const gyroSmoothing = 0.12;
       const biasStillThreshold = 0.6;
       let smoothX = 0;
       let smoothY = 0;
@@ -230,24 +279,18 @@
         setTimeout(() => toast.classList.remove("show"), duration);
       }
 
-      function fmt(value) {
-        return typeof value === "number" ? value.toFixed(2) : "—";
-      }
-
-      function updateDebug(event) {
-        const acc = event.acceleration || {};
-        const accG = event.accelerationIncludingGravity || {};
-        const rate = event.rotationRate || {};
-        debugEl.textContent =
-          `acc:  x ${fmt(acc.x)}  y ${fmt(acc.y)}  z ${fmt(acc.z)}\n` +
-          `accG: x ${fmt(accG.x)}  y ${fmt(accG.y)}  z ${fmt(accG.z)}\n` +
-          `rot:  a ${fmt(rate.alpha)}  b ${fmt(rate.beta)}  g ${fmt(rate.gamma)}`;
+      function updateSettingsUI() {
+        mouseSensInput.value = gyroGain.toFixed(1);
+        scrollSensInput.value = scrollScale.toFixed(1);
+        mouseValue.textContent = gyroGain.toFixed(1);
+        scrollValue.textContent = scrollScale.toFixed(1);
       }
 
       track.addEventListener("pointerdown", (event) => {
         track.setPointerCapture(event.pointerId);
         lastX = event.clientX;
         lastY = event.clientY;
+        touchActive = true;
       });
 
       track.addEventListener("pointermove", (event) => {
@@ -267,6 +310,7 @@
         pendingDx = 0;
         pendingDy = 0;
         pendingScroll = 0;
+        touchActive = false;
       }
 
       track.addEventListener("pointerup", resetDrag);
@@ -277,7 +321,11 @@
         const now = Date.now();
         if (now - lastTap < 250) return;
         lastTap = now;
+        touchActive = true;
         send("click");
+        setTimeout(() => {
+          touchActive = false;
+        }, 150);
       });
 
       function flush() {
@@ -336,8 +384,8 @@
       }
 
       function onMotion(event) {
-        updateDebug(event);
         if (!gyroEnabled) return;
+        if (touchActive) return;
         const rate = event.rotationRate;
         if (!rate) return;
         gyroSeen = true;
@@ -370,6 +418,7 @@
 
       function onOrientation(event) {
         if (!gyroEnabled) return;
+        if (touchActive) return;
         if (usingMotion) return;
         if (typeof event.alpha !== "number" || typeof event.beta !== "number")
           return;
@@ -464,6 +513,19 @@
       }
 
       gyroBtn.addEventListener("click", enableGyro);
+      settingsBtn.addEventListener("click", () => {
+        settingsPanel.classList.toggle("open");
+      });
+
+      mouseSensInput.addEventListener("input", () => {
+        gyroGain = Number(mouseSensInput.value);
+        updateSettingsUI();
+      });
+
+      scrollSensInput.addEventListener("input", () => {
+        scrollScale = Number(scrollSensInput.value);
+        updateSettingsUI();
+      });
       track.addEventListener("pointerdown", () => {
         if (!gyroEnabled) enableGyro();
       });
@@ -472,6 +534,7 @@
         if (document.hidden) resetDrag();
       });
 
+      updateSettingsUI();
       setInterval(flush, frameMs);
 
       connect();
