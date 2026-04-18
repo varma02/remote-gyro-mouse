@@ -14,6 +14,7 @@ from typing import Dict, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "index.html")
+FAVICON = os.path.join(HERE, "icon.png")
 SSL_CERT = os.path.join(HERE, "ssl", "cert.pem")
 SSL_KEY = os.path.join(HERE, "ssl", "key.pem")
 
@@ -452,6 +453,8 @@ def serve_client(sock: socket.socket, address: tuple, backend: InputBackend) -> 
 
         if path == "/":
             send_file(sock, INDEX_HTML, "text/html; charset=utf-8")
+        elif path == "/favicon.png":
+            send_file(sock, FAVICON, "image/png")
         else:
             send_http(sock, "404 Not Found", {"Content-Length": "0"})
     finally:

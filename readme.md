@@ -2,6 +2,8 @@
 > This is a very "vibe coded" project, intended for my personal use only. It may be buggy, insecure, and not suitable for production use.  
 > **Use at your own risk.**
 
+![icon](icon.png)
+
 # Remote Gyro Mouse
 
 Turn your phone into a gyro-based remote for controlling a media PC cursor over the local network.
