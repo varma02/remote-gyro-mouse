@@ -248,7 +248,7 @@
       const idleLockMs = 4000;
       const shakeThreshold = 120;
       const shakeWakeMs = 3000;
-      let lastMoveTs = 0;
+      let lastActivityTs = 0;
       let gyroLocked = false;
       const shakeSamples = [];
       let smoothX = 0;
@@ -301,14 +301,22 @@
         gyroBtn.textContent = locked ? "Gyro locked" : "Gyro on";
       }
 
+      function recordActivity() {
+        if (gyroLocked) return;
+        lastActivityTs = performance.now();
+      }
+
       track.addEventListener("pointerdown", (event) => {
+        if (gyroLocked) return;
         track.setPointerCapture(event.pointerId);
         lastX = event.clientX;
         lastY = event.clientY;
         touchActive = true;
+        recordActivity();
       });
 
       track.addEventListener("pointermove", (event) => {
+        if (gyroLocked) return;
         if (lastX === null || lastY === null) return;
         const dx = event.clientX - lastX;
         const dy = event.clientY - lastY;
@@ -317,6 +325,7 @@
         }
         lastX = event.clientX;
         lastY = event.clientY;
+        recordActivity();
       });
 
       function resetDrag() {
@@ -333,11 +342,13 @@
       track.addEventListener("pointerleave", resetDrag);
 
       track.addEventListener("click", () => {
+        if (gyroLocked) return;
         const now = Date.now();
         if (now - lastTap < 250) return;
         lastTap = now;
         touchActive = true;
         send("click");
+        recordActivity();
         setTimeout(() => {
           touchActive = false;
         }, 150);
@@ -392,7 +403,7 @@
           shakeSamples.reduce((sum, sample) => sum + sample.s, 0) /
           Math.max(shakeSamples.length, 1);
 
-        if (now - lastMoveTs > idleLockMs) {
+        if (now - lastActivityTs > idleLockMs) {
           setGyroLocked(true);
         }
 
@@ -423,7 +434,7 @@
         pendingDy += smoothY;
 
         if (vx !== 0 || vy !== 0) {
-          lastMoveTs = now;
+          recordActivity();
         }
       }
 
@@ -540,7 +551,7 @@
         biasCount = 0;
         smoothX = 0;
         smoothY = 0;
-        lastMoveTs = 0;
+        lastActivityTs = performance.now();
         shakeSamples.length = 0;
         setGyroLocked(false);
         window.addEventListener("devicemotion", onMotion);
