@@ -240,14 +240,14 @@
       let gyroGain = 20.0;
       const gyroMax = 200;
       const gyroDeadzone = 0.8;
-      const gyroSmoothing = 1;
+      const gyroSmoothing = 0.9;
       const biasStillThreshold = 0.6;
       const accelGain = 2.2;
       const accelRef = 25;
       const accelMax = 6;
       const idleLockMs = 4000;
-      const shakeThreshold = 120;
-      const shakeWakeMs = 3000;
+      const shakeThreshold = 200;
+      const shakeWakeMs = 1500;
       let lastActivityTs = 0;
       let gyroLocked = false;
       const shakeSamples = [];

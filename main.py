@@ -3,13 +3,14 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import socket
 import ssl
 import struct
 import subprocess
 import threading
+import time
 from typing import Dict, Optional
-
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "index.html")
@@ -22,6 +23,12 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s: %(message)s",
 )
 
+try:
+    from evdev import UInput, ecodes
+except Exception:
+    UInput = None
+    ecodes = None
+
 
 class InputBackend:
     def scroll(self, amount: int) -> None:
@@ -32,6 +39,52 @@ class InputBackend:
 
     def move(self, dx: int, dy: int) -> None:
         raise NotImplementedError
+
+
+class EvdevBackend(InputBackend):
+    def __init__(self) -> None:
+        self._available = False
+        self._ui = None
+        if UInput is None or ecodes is None:
+            return
+        try:
+            capabilities = {
+                ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y, ecodes.REL_WHEEL],
+                ecodes.EV_KEY: [ecodes.BTN_LEFT],
+            }
+            self._ui = UInput(capabilities, name="gyro-mouse")
+            self._available = True
+        except Exception as exc:
+            logging.warning("evdev backend unavailable: %s", exc)
+
+    def available(self) -> bool:
+        return self._available
+
+    def scroll(self, amount: int) -> None:
+        if not self._available or not self._ui:
+            return
+        if amount == 0:
+            return
+        self._ui.write(ecodes.EV_REL, ecodes.REL_WHEEL, amount)
+        self._ui.syn()
+
+    def click(self) -> None:
+        if not self._available or not self._ui:
+            return
+        self._ui.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
+        self._ui.syn()
+        time.sleep(0.005)
+        self._ui.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
+        self._ui.syn()
+
+    def move(self, dx: int, dy: int) -> None:
+        if not self._available or not self._ui:
+            return
+        if dx == 0 and dy == 0:
+            return
+        self._ui.write(ecodes.EV_REL, ecodes.REL_X, dx)
+        self._ui.write(ecodes.EV_REL, ecodes.REL_Y, dy)
+        self._ui.syn()
 
 
 class YdotoolBackend(InputBackend):
@@ -58,7 +111,12 @@ class YdotoolBackend(InputBackend):
     def click(self) -> None:
         if not self._ydotool:
             return
-        subprocess.run([self._ydotool, "click", "1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [self._ydotool, "click", "1"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def move(self, dx: int, dy: int) -> None:
         if not self._ydotool:
@@ -95,7 +153,12 @@ class XdotoolBackend(InputBackend):
     def click(self) -> None:
         if not self._xdotool:
             return
-        subprocess.run([self._xdotool, "click", "1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [self._xdotool, "click", "1"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def move(self, dx: int, dy: int) -> None:
         if not self._xdotool:
@@ -119,6 +182,68 @@ class LogBackend(InputBackend):
         logging.info("move %s %s", dx, dy)
 
 
+class CoalescingBackend(InputBackend):
+    def __init__(self, backend: InputBackend, flush_ms: int = 4) -> None:
+        self._backend = backend
+        self._flush_interval = max(flush_ms, 1) / 1000.0
+        self._queue: "queue.Queue" = queue.Queue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        pending_dx = 0
+        pending_dy = 0
+        pending_scroll = 0
+        last_flush = time.monotonic()
+        while not self._stop.is_set():
+            try:
+                event, a, b = self._queue.get(timeout=self._flush_interval)
+            except queue.Empty:
+                event = None
+                a = 0
+                b = 0
+
+            if event == "move":
+                pending_dx += a
+                pending_dy += b
+            elif event == "scroll":
+                pending_scroll += a
+            elif event == "click":
+                self._backend.click()
+
+            now = time.monotonic()
+            if now - last_flush >= self._flush_interval:
+                if pending_dx or pending_dy:
+                    self._backend.move(pending_dx, pending_dy)
+                    pending_dx = 0
+                    pending_dy = 0
+                if pending_scroll:
+                    remaining = pending_scroll
+                    step = 10 if remaining > 0 else -10
+                    while remaining:
+                        if abs(remaining) <= 10:
+                            self._backend.scroll(remaining)
+                            remaining = 0
+                        else:
+                            self._backend.scroll(step)
+                            remaining -= step
+                    pending_scroll = 0
+                last_flush = now
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def scroll(self, amount: int) -> None:
+        self._queue.put(("scroll", amount, 0))
+
+    def click(self) -> None:
+        self._queue.put(("click", 0, 0))
+
+    def move(self, dx: int, dy: int) -> None:
+        self._queue.put(("move", dx, dy))
+
+
 def shutil_which(name: str) -> Optional[str]:
     for path in os.environ.get("PATH", "").split(os.pathsep):
         candidate = os.path.join(path, name)
@@ -128,14 +253,31 @@ def shutil_which(name: str) -> Optional[str]:
 
 
 def pick_backend() -> InputBackend:
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    is_wayland = session_type == "wayland" or "WAYLAND_DISPLAY" in os.environ
+    is_x11 = session_type == "x11" or "DISPLAY" in os.environ
+
+    if is_x11 and not is_wayland:
+        xdotool = XdotoolBackend()
+        if xdotool.available():
+            logging.info("input backend: xdotool (x11)")
+            return xdotool
+
+    evdev = EvdevBackend()
+    if evdev.available():
+        logging.info("input backend: evdev")
+        return evdev
     ydotool = YdotoolBackend()
     if ydotool.available():
         logging.info("input backend: ydotool")
         return ydotool
-    xdotool = XdotoolBackend()
-    if xdotool.available():
-        logging.info("input backend: xdotool")
-        return xdotool
+
+    if not is_x11:
+        xdotool = XdotoolBackend()
+        if xdotool.available():
+            logging.info("input backend: xdotool (fallback)")
+            return xdotool
+
     logging.warning("no input backend found; falling back to log only")
     return LogBackend()
 
@@ -179,11 +321,15 @@ def parse_headers(data: bytes) -> Dict[str, str]:
             break
         if b":" in line:
             name, value = line.split(b":", 1)
-            headers[name.decode("ascii").strip().lower()] = value.decode("ascii").strip()
+            headers[name.decode("ascii").strip().lower()] = value.decode(
+                "ascii"
+            ).strip()
     return headers
 
 
-def send_http(sock: socket.socket, status: str, headers: Dict[str, str], body: bytes = b"") -> None:
+def send_http(
+    sock: socket.socket, status: str, headers: Dict[str, str], body: bytes = b""
+) -> None:
     header_lines = [f"HTTP/1.1 {status}"]
     for key, value in headers.items():
         header_lines.append(f"{key}: {value}")
@@ -316,7 +462,7 @@ def serve_client(sock: socket.socket, address: tuple, backend: InputBackend) -> 
 
 
 def serve(host: str, port: int) -> None:
-    backend = pick_backend()
+    backend = CoalescingBackend(pick_backend())
     logging.info("starting gyro mouse server")
     logging.info("serving https on %s:%s", host, port)
 
