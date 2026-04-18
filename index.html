@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>Gyro Mouse</title>
+    <style>
+      :root {
+        --bg: #0b0d12;
+        --surface: #141925;
+        --line: rgba(255, 255, 255, 0.08);
+        --accent: #5c7cfa;
+        --text: #f1f3f5;
+        --muted: #9aa2ad;
+      }
+
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: radial-gradient(
+          circle at top,
+          #1a2030 0%,
+          #0b0d12 60%,
+          #090b0f 100%
+        );
+        color: var(--text);
+        font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
+        overflow: hidden;
+        touch-action: none;
+      }
+
+      .status {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+        color: var(--muted);
+        z-index: 5;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #ff6b6b;
+        box-shadow: 0 0 12px rgba(255, 107, 107, 0.6);
+      }
+
+      .status.connected .status-dot {
+        background: #51cf66;
+        box-shadow: 0 0 12px rgba(81, 207, 102, 0.6);
+      }
+
+      .track {
+        position: fixed;
+        inset: 0;
+        background: linear-gradient(
+          160deg,
+          rgba(20, 25, 37, 0.96),
+          rgba(12, 15, 22, 0.95)
+        );
+        border: 1px solid var(--line);
+        z-index: 1;
+      }
+
+      .track::before,
+      .track::after {
+        content: "";
+        position: absolute;
+        inset: 24px;
+        border-radius: 18px;
+        border: 1px dashed rgba(92, 124, 250, 0.35);
+      }
+
+      .track::after {
+        inset: 48px;
+        border-style: solid;
+        border-color: rgba(92, 124, 250, 0.2);
+      }
+
+      .hint {
+        position: absolute;
+        bottom: 18px;
+        right: 18px;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: right;
+        background: rgba(11, 13, 18, 0.6);
+        padding: 8px 10px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .gyro {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        background: rgba(20, 25, 37, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        padding: 8px 12px;
+        border-radius: 14px;
+        font-size: 12px;
+        z-index: 6;
+      }
+
+      .toast {
+        position: fixed;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        background: rgba(12, 15, 22, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--muted);
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        display: none;
+        z-index: 6;
+      }
+
+      .toast.show {
+        display: block;
+      }
+
+      .debug {
+        position: fixed;
+        top: 52px;
+        left: 12px;
+        background: rgba(12, 15, 22, 0.75);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--muted);
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        z-index: 6;
+        min-width: 220px;
+        white-space: pre-line;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="status" id="status">
+      <span class="status-dot"></span>
+      <span id="status-text">Disconnected</span>
+    </div>
+    <button class="gyro" id="gyro">Enable gyro</button>
+    <div class="track" id="track">
+      <div class="hint">Drag to move • Up/Down drag scrolls • Tap to click</div>
+    </div>
+    <div class="debug" id="debug">Motion: waiting…</div>
+    <div class="toast" id="toast"></div>
+    <script>
+      const statusEl = document.getElementById("status");
+      const statusText = document.getElementById("status-text");
+      const track = document.getElementById("track");
+      const gyroBtn = document.getElementById("gyro");
+      const toast = document.getElementById("toast");
+      const debugEl = document.getElementById("debug");
+
+      let socket;
+      let lastX = null;
+      let lastY = null;
+      let lastTap = 0;
+      let pendingDx = 0;
+      let pendingDy = 0;
+      let pendingScroll = 0;
+      let gyroEnabled = false;
+      let gyroSeen = false;
+      let gyroWatchdog = null;
+      let gyroLastTs = null;
+      let lastOrientation = null;
+      let usingMotion = false;
+      let biasX = 0;
+      let biasY = 0;
+      let biasCount = 0;
+      const scrollScale = 0.4;
+      const moveScale = 2;
+      const gyroGain = 5.0;
+      const gyroMax = 60;
+      const gyroDeadzone = 0.8;
+      const gyroSmoothing = 0.3;
+      const biasStillThreshold = 0.6;
+      let smoothX = 0;
+      let smoothY = 0;
+      const frameMs = 16;
+      const maxQueue = 60;
+
+      function connect() {
+        const url = `wss://${location.host}/ws`;
+        socket = new WebSocket(url);
+
+        socket.addEventListener("open", () => {
+          statusEl.classList.add("connected");
+          statusText.textContent = "Connected";
+        });
+
+        socket.addEventListener("close", () => {
+          statusEl.classList.remove("connected");
+          statusText.textContent = "Disconnected";
+          setTimeout(connect, 1500);
+        });
+
+        socket.addEventListener("error", () => {
+          statusEl.classList.remove("connected");
+          statusText.textContent = "Disconnected";
+        });
+      }
+
+      function send(event, payload = {}) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ event, ...payload }));
+      }
+
+      function showToast(message, duration = 2000) {
+        toast.textContent = message;
+        toast.classList.add("show");
+        setTimeout(() => toast.classList.remove("show"), duration);
+      }
+
+      function fmt(value) {
+        return typeof value === "number" ? value.toFixed(2) : "—";
+      }
+
+      function updateDebug(event) {
+        const acc = event.acceleration || {};
+        const accG = event.accelerationIncludingGravity || {};
+        const rate = event.rotationRate || {};
+        debugEl.textContent =
+          `acc:  x ${fmt(acc.x)}  y ${fmt(acc.y)}  z ${fmt(acc.z)}\n` +
+          `accG: x ${fmt(accG.x)}  y ${fmt(accG.y)}  z ${fmt(accG.z)}\n` +
+          `rot:  a ${fmt(rate.alpha)}  b ${fmt(rate.beta)}  g ${fmt(rate.gamma)}`;
+      }
+
+      track.addEventListener("pointerdown", (event) => {
+        track.setPointerCapture(event.pointerId);
+        lastX = event.clientX;
+        lastY = event.clientY;
+      });
+
+      track.addEventListener("pointermove", (event) => {
+        if (lastX === null || lastY === null) return;
+        const dx = event.clientX - lastX;
+        const dy = event.clientY - lastY;
+        if (Math.abs(dy) > 1) {
+          pendingScroll += dy * scrollScale;
+        }
+        lastX = event.clientX;
+        lastY = event.clientY;
+      });
+
+      function resetDrag() {
+        lastX = null;
+        lastY = null;
+        pendingDx = 0;
+        pendingDy = 0;
+        pendingScroll = 0;
+      }
+
+      track.addEventListener("pointerup", resetDrag);
+      track.addEventListener("pointercancel", resetDrag);
+      track.addEventListener("pointerleave", resetDrag);
+
+      track.addEventListener("click", () => {
+        const now = Date.now();
+        if (now - lastTap < 250) return;
+        lastTap = now;
+        send("click");
+      });
+
+      function flush() {
+        if (Math.abs(pendingDx) > maxQueue)
+          pendingDx = Math.sign(pendingDx) * maxQueue;
+        if (Math.abs(pendingDy) > maxQueue)
+          pendingDy = Math.sign(pendingDy) * maxQueue;
+        if (Math.abs(pendingScroll) > maxQueue)
+          pendingScroll = Math.sign(pendingScroll) * maxQueue;
+        const dx = Math.round(pendingDx);
+        const dy = Math.round(pendingDy);
+        const scroll = Math.round(pendingScroll);
+        if (dx !== 0 || dy !== 0) {
+          send("move", { dx, dy });
+        }
+        if (scroll !== 0) {
+          send("scroll", { dy: scroll });
+        }
+        pendingDx -= dx;
+        pendingDy -= dy;
+        pendingScroll -= scroll;
+      }
+
+      function updateBias(xRate, yRate) {
+        if (
+          Math.abs(xRate) < biasStillThreshold &&
+          Math.abs(yRate) < biasStillThreshold
+        ) {
+          biasX = (biasX * biasCount + xRate) / (biasCount + 1);
+          biasY = (biasY * biasCount + yRate) / (biasCount + 1);
+          biasCount = Math.min(biasCount + 1, 200);
+        }
+      }
+
+      function applyRates(xRate, yRate, dt) {
+        updateBias(xRate, yRate);
+        const x = -(xRate - biasX);
+        const y = -(yRate - biasY);
+
+        let vx = x * gyroGain * dt;
+        let vy = -y * gyroGain * dt;
+
+        if (Math.abs(vx) < gyroDeadzone) vx = 0;
+        if (Math.abs(vy) < gyroDeadzone) vy = 0;
+
+        if (vx > gyroMax) vx = gyroMax;
+        if (vx < -gyroMax) vx = -gyroMax;
+        if (vy > gyroMax) vy = gyroMax;
+        if (vy < -gyroMax) vy = -gyroMax;
+
+        smoothX += (vx - smoothX) * gyroSmoothing;
+        smoothY += (vy - smoothY) * gyroSmoothing;
+
+        pendingDx += smoothX;
+        pendingDy += smoothY;
+      }
+
+      function onMotion(event) {
+        updateDebug(event);
+        if (!gyroEnabled) return;
+        const rate = event.rotationRate;
+        if (!rate) return;
+        gyroSeen = true;
+        usingMotion = true;
+        const now = event.timeStamp || performance.now();
+        if (gyroLastTs === null) {
+          gyroLastTs = now;
+          return;
+        }
+        const rawDt = (now - gyroLastTs) / 1000;
+        if (!isFinite(rawDt) || rawDt <= 0) return;
+        const dt = Math.min(rawDt, 0.05);
+        gyroLastTs = now;
+
+        const alphaRate = typeof rate.alpha === "number" ? rate.alpha : null;
+        const gammaRate = typeof rate.gamma === "number" ? rate.gamma : null;
+
+        const angle =
+          screen.orientation && typeof screen.orientation.angle === "number"
+            ? screen.orientation.angle
+            : typeof window.orientation === "number"
+              ? window.orientation
+              : 0;
+
+        const xRate = gammaRate !== null ? gammaRate : 0;
+        const yRate = alphaRate !== null ? alphaRate : 0;
+
+        applyRates(xRate, -yRate, dt);
+      }
+
+      function onOrientation(event) {
+        if (!gyroEnabled) return;
+        if (usingMotion) return;
+        if (typeof event.alpha !== "number" || typeof event.beta !== "number")
+          return;
+        gyroSeen = true;
+        const now = event.timeStamp || performance.now();
+        if (gyroLastTs === null) {
+          gyroLastTs = now;
+          return;
+        }
+        const rawDt = (now - gyroLastTs) / 1000;
+        if (!isFinite(rawDt) || rawDt <= 0) return;
+        const dt = Math.min(rawDt, 0.05);
+        gyroLastTs = now;
+
+        if (!lastOrientation) {
+          lastOrientation = {
+            alpha: event.alpha,
+            beta: event.beta,
+            gamma: event.gamma,
+          };
+          return;
+        }
+
+        let dAlpha = event.alpha - lastOrientation.alpha;
+        let dBeta = event.beta - lastOrientation.beta;
+        let dGamma = event.gamma - lastOrientation.gamma;
+
+        if (dAlpha > 180) dAlpha -= 360;
+        if (dAlpha < -180) dAlpha += 360;
+        if (dBeta > 180) dBeta -= 360;
+        if (dBeta < -180) dBeta += 360;
+        if (dGamma > 180) dGamma -= 360;
+        if (dGamma < -180) dGamma += 360;
+
+        lastOrientation = {
+          alpha: event.alpha,
+          beta: event.beta,
+          gamma: event.gamma,
+        };
+
+        const alphaRate = dAlpha / dt;
+        const gammaRate = dGamma / dt;
+
+        const angle =
+          screen.orientation && typeof screen.orientation.angle === "number"
+            ? screen.orientation.angle
+            : typeof window.orientation === "number"
+              ? window.orientation
+              : 0;
+
+        const xRate = gammaRate;
+        const yRate = alphaRate;
+
+        applyRates(xRate, -yRate, dt);
+      }
+
+      async function enableGyro() {
+        if (gyroEnabled) return;
+        if (
+          typeof DeviceOrientationEvent !== "undefined" &&
+          typeof DeviceOrientationEvent.requestPermission === "function"
+        ) {
+          const result = await DeviceOrientationEvent.requestPermission();
+          if (result !== "granted") {
+            showToast("Gyro permission denied");
+            return;
+          }
+        }
+        gyroEnabled = true;
+        gyroLastTs = null;
+        lastOrientation = null;
+        usingMotion = false;
+        biasX = 0;
+        biasY = 0;
+        biasCount = 0;
+        smoothX = 0;
+        smoothY = 0;
+        gyroBtn.textContent = "Gyro on";
+        window.addEventListener("devicemotion", onMotion);
+        window.addEventListener("deviceorientation", onOrientation);
+        window.addEventListener("deviceorientationabsolute", onOrientation);
+        if (gyroWatchdog) clearTimeout(gyroWatchdog);
+        gyroWatchdog = setTimeout(() => {
+          if (!gyroSeen) {
+            showToast(
+              "No gyro data. Check motion sensors and permissions.",
+              3000,
+            );
+          }
+        }, 1500);
+        showToast("Gyro enabled");
+      }
+
+      gyroBtn.addEventListener("click", enableGyro);
+      track.addEventListener("pointerdown", () => {
+        if (!gyroEnabled) enableGyro();
+      });
+      window.addEventListener("blur", resetDrag);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) resetDrag();
+      });
+
+      setInterval(flush, frameMs);
+
+      connect();
+    </script>
+  </body>
+</html>
