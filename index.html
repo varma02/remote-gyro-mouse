@@ -193,7 +193,7 @@
       <label>
         Mouse sensitivity
         <span class="value" id="mouse-value"></span>
-        <input id="mouse-sens" type="range" min="1" max="30" step="0.5" />
+        <input id="mouse-sens" type="range" min="1" max="80" step="1" />
       </label>
       <label>
         Scroll sensitivity
@@ -237,15 +237,24 @@
       let biasCount = 0;
       let scrollScale = 0.4;
       const moveScale = 2;
-      let gyroGain = 10.0;
-      const gyroMax = 60;
+      let gyroGain = 20.0;
+      const gyroMax = 200;
       const gyroDeadzone = 0.8;
-      const gyroSmoothing = 0.12;
+      const gyroSmoothing = 1;
       const biasStillThreshold = 0.6;
+      const accelGain = 2.2;
+      const accelRef = 25;
+      const accelMax = 6;
+      const idleLockMs = 4000;
+      const shakeThreshold = 120;
+      const shakeWakeMs = 3000;
+      let lastMoveTs = 0;
+      let gyroLocked = false;
+      const shakeSamples = [];
       let smoothX = 0;
       let smoothY = 0;
       const frameMs = 16;
-      const maxQueue = 60;
+      const maxQueue = 300;
 
       function connect() {
         const url = `wss://${location.host}/ws`;
@@ -284,6 +293,12 @@
         scrollSensInput.value = scrollScale.toFixed(1);
         mouseValue.textContent = gyroGain.toFixed(1);
         scrollValue.textContent = scrollScale.toFixed(1);
+      }
+
+      function setGyroLocked(locked) {
+        if (gyroLocked === locked) return;
+        gyroLocked = locked;
+        gyroBtn.textContent = locked ? "Gyro locked" : "Gyro on";
       }
 
       track.addEventListener("pointerdown", (event) => {
@@ -365,8 +380,33 @@
         const x = -(xRate - biasX);
         const y = -(yRate - biasY);
 
-        let vx = x * gyroGain * dt;
-        let vy = -y * gyroGain * dt;
+        const speed = Math.hypot(x, y);
+        const now = performance.now();
+
+        shakeSamples.push({ t: now, s: speed });
+        while (shakeSamples.length && now - shakeSamples[0].t > shakeWakeMs) {
+          shakeSamples.shift();
+        }
+
+        const avgSpeed =
+          shakeSamples.reduce((sum, sample) => sum + sample.s, 0) /
+          Math.max(shakeSamples.length, 1);
+
+        if (now - lastMoveTs > idleLockMs) {
+          setGyroLocked(true);
+        }
+
+        if (gyroLocked) {
+          if (avgSpeed < shakeThreshold) {
+            return;
+          }
+          setGyroLocked(false);
+        }
+        let accelFactor = 1 + (speed / accelRef) * accelGain;
+        if (accelFactor > accelMax) accelFactor = accelMax;
+
+        let vx = x * gyroGain * dt * accelFactor;
+        let vy = -y * gyroGain * dt * accelFactor;
 
         if (Math.abs(vx) < gyroDeadzone) vx = 0;
         if (Math.abs(vy) < gyroDeadzone) vy = 0;
@@ -381,6 +421,10 @@
 
         pendingDx += smoothX;
         pendingDy += smoothY;
+
+        if (vx !== 0 || vy !== 0) {
+          lastMoveTs = now;
+        }
       }
 
       function onMotion(event) {
@@ -496,7 +540,9 @@
         biasCount = 0;
         smoothX = 0;
         smoothY = 0;
-        gyroBtn.textContent = "Gyro on";
+        lastMoveTs = 0;
+        shakeSamples.length = 0;
+        setGyroLocked(false);
         window.addEventListener("devicemotion", onMotion);
         window.addEventListener("deviceorientation", onOrientation);
         window.addEventListener("deviceorientationabsolute", onOrientation);
@@ -510,6 +556,7 @@
           }
         }, 1500);
         showToast("Gyro enabled");
+        gyroBtn.textContent = "Gyro on";
       }
 
       gyroBtn.addEventListener("click", enableGyro);
