@@ -35,6 +35,9 @@ class InputBackend:
     def scroll(self, amount: int) -> None:
         raise NotImplementedError
 
+    def scroll_h(self, amount: int) -> None:
+        raise NotImplementedError
+
     def click(self) -> None:
         raise NotImplementedError
 
@@ -50,7 +53,12 @@ class EvdevBackend(InputBackend):
             return
         try:
             capabilities = {
-                ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y, ecodes.REL_WHEEL],
+                ecodes.EV_REL: [
+                    ecodes.REL_X,
+                    ecodes.REL_Y,
+                    ecodes.REL_WHEEL,
+                    ecodes.REL_HWHEEL,
+                ],
                 ecodes.EV_KEY: [ecodes.BTN_LEFT],
             }
             self._ui = UInput(capabilities, name="gyro-mouse")
@@ -67,6 +75,14 @@ class EvdevBackend(InputBackend):
         if amount == 0:
             return
         self._ui.write(ecodes.EV_REL, ecodes.REL_WHEEL, amount)
+        self._ui.syn()
+
+    def scroll_h(self, amount: int) -> None:
+        if not self._available or not self._ui:
+            return
+        if amount == 0:
+            return
+        self._ui.write(ecodes.EV_REL, ecodes.REL_HWHEEL, amount)
         self._ui.syn()
 
     def click(self) -> None:
@@ -102,6 +118,20 @@ class YdotoolBackend(InputBackend):
         if steps == 0:
             return
         button = "4" if amount > 0 else "5"
+        subprocess.run(
+            [self._ydotool, "click", "-r", str(steps), button],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def scroll_h(self, amount: int) -> None:
+        if not self._ydotool:
+            return
+        steps = min(abs(amount), 10)
+        if steps == 0:
+            return
+        button = "7" if amount > 0 else "6"
         subprocess.run(
             [self._ydotool, "click", "-r", str(steps), button],
             check=False,
@@ -151,6 +181,20 @@ class XdotoolBackend(InputBackend):
             stderr=subprocess.DEVNULL,
         )
 
+    def scroll_h(self, amount: int) -> None:
+        if not self._xdotool:
+            return
+        steps = min(abs(amount), 10)
+        if steps == 0:
+            return
+        button = "7" if amount > 0 else "6"
+        subprocess.run(
+            [self._xdotool, "click", "--repeat", str(steps), "--delay", "0", button],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     def click(self) -> None:
         if not self._xdotool:
             return
@@ -176,6 +220,9 @@ class LogBackend(InputBackend):
     def scroll(self, amount: int) -> None:
         logging.info("scroll %s", amount)
 
+    def scroll_h(self, amount: int) -> None:
+        logging.info("scroll_h %s", amount)
+
     def click(self) -> None:
         logging.info("click")
 
@@ -195,7 +242,8 @@ class CoalescingBackend(InputBackend):
     def _run(self) -> None:
         pending_dx = 0
         pending_dy = 0
-        pending_scroll = 0
+        pending_scroll_x = 0
+        pending_scroll_y = 0
         last_flush = time.monotonic()
         while not self._stop.is_set():
             try:
@@ -209,7 +257,9 @@ class CoalescingBackend(InputBackend):
                 pending_dx += a
                 pending_dy += b
             elif event == "scroll":
-                pending_scroll += a
+                pending_scroll_y += a
+            elif event == "scroll_h":
+                pending_scroll_x += a
             elif event == "click":
                 self._backend.click()
 
@@ -219,8 +269,8 @@ class CoalescingBackend(InputBackend):
                     self._backend.move(pending_dx, pending_dy)
                     pending_dx = 0
                     pending_dy = 0
-                if pending_scroll:
-                    remaining = pending_scroll
+                if pending_scroll_y:
+                    remaining = pending_scroll_y
                     step = 10 if remaining > 0 else -10
                     while remaining:
                         if abs(remaining) <= 10:
@@ -229,7 +279,18 @@ class CoalescingBackend(InputBackend):
                         else:
                             self._backend.scroll(step)
                             remaining -= step
-                    pending_scroll = 0
+                    pending_scroll_y = 0
+                if pending_scroll_x:
+                    remaining = pending_scroll_x
+                    step = 10 if remaining > 0 else -10
+                    while remaining:
+                        if abs(remaining) <= 10:
+                            self._backend.scroll_h(remaining)
+                            remaining = 0
+                        else:
+                            self._backend.scroll_h(step)
+                            remaining -= step
+                    pending_scroll_x = 0
                 last_flush = now
 
     def stop(self) -> None:
@@ -237,6 +298,9 @@ class CoalescingBackend(InputBackend):
 
     def scroll(self, amount: int) -> None:
         self._queue.put(("scroll", amount, 0))
+
+    def scroll_h(self, amount: int) -> None:
+        self._queue.put(("scroll_h", amount, 0))
 
     def click(self) -> None:
         self._queue.put(("click", 0, 0))
@@ -397,13 +461,26 @@ def handle_ws(sock: socket.socket, backend: InputBackend, peer: str) -> None:
                 continue
             event = data.get("event")
             if event == "scroll":
-                amount = int(float(data.get("dy", 0)))
-                if amount > 10:
-                    amount = 10
-                elif amount < -10:
-                    amount = -10
-                if amount != 0:
-                    backend.scroll(amount)
+                dx_raw = data.get("dx", 0)
+                dy_raw = data.get("dy", 0)
+                try:
+                    dx = int(float(dx_raw)) if dx_raw is not None else 0
+                    dy = int(float(dy_raw)) if dy_raw is not None else 0
+                except (TypeError, ValueError):
+                    dx = 0
+                    dy = 0
+                if dx > 10:
+                    dx = 10
+                elif dx < -10:
+                    dx = -10
+                if dy > 10:
+                    dy = 10
+                elif dy < -10:
+                    dy = -10
+                if dy != 0:
+                    backend.scroll(dy)
+                if dx != 0:
+                    backend.scroll_h(dx)
             elif event == "click":
                 backend.click()
             elif event == "move":

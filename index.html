@@ -201,9 +201,15 @@
         <span class="value" id="scroll-value"></span>
         <input id="scroll-sens" type="range" min="0.1" max="3" step="0.1" />
       </label>
+      <label>
+        Touch-only mode
+        <input id="touch-only" type="checkbox" />
+      </label>
     </div>
     <div class="track" id="track">
-      <div class="hint">Drag to move • Up/Down drag scrolls • Tap to click</div>
+      <div class="hint" id="hint">
+        Gyro moves • Drag to scroll • Tap to click
+      </div>
     </div>
     <div class="toast" id="toast"></div>
     <script>
@@ -216,8 +222,10 @@
       const settingsPanel = document.getElementById("settings");
       const mouseSensInput = document.getElementById("mouse-sens");
       const scrollSensInput = document.getElementById("scroll-sens");
+      const touchOnlyInput = document.getElementById("touch-only");
       const mouseValue = document.getElementById("mouse-value");
       const scrollValue = document.getElementById("scroll-value");
+      const hintEl = document.getElementById("hint");
 
       let socket;
       let lastX = null;
@@ -226,7 +234,19 @@
       let pendingDx = 0;
       let pendingDy = 0;
       let pendingScroll = 0;
+      let pendingScrollX = 0;
       let touchActive = false;
+      let touchOnly = false;
+      let lastTouchX = null;
+      let lastTouchY = null;
+      let lastTouchScrollY = null;
+      let lastTouchScrollX = null;
+      let tapStartTime = 0;
+      let tapStartX = null;
+      let tapStartY = null;
+      let tapCanceled = false;
+      const tapMoveThreshold = 12;
+      const tapMaxMs = 250;
       let gyroEnabled = false;
       let gyroSeen = false;
       let gyroWatchdog = null;
@@ -292,23 +312,30 @@
       function updateSettingsUI() {
         mouseSensInput.value = gyroGain.toFixed(1);
         scrollSensInput.value = scrollScale.toFixed(1);
+        touchOnlyInput.checked = touchOnly;
+        gyroBtn.disabled = touchOnly;
         mouseValue.textContent = gyroGain.toFixed(1);
         scrollValue.textContent = scrollScale.toFixed(1);
+        hintEl.textContent = touchOnly
+          ? "One finger moves • Two fingers scroll • Tap to click"
+          : "Gyro moves • Drag to scroll • Tap to click";
       }
 
       function setGyroLocked(locked) {
         if (gyroLocked === locked) return;
         gyroLocked = locked;
+        if (touchOnly) return;
         gyroBtn.textContent = locked ? "Gyro locked" : "Gyro on";
       }
 
       function recordActivity() {
-        if (gyroLocked) return;
+        if (gyroLocked && !touchOnly) return;
         lastActivityTs = performance.now();
       }
 
       track.addEventListener("pointerdown", (event) => {
         if (gyroLocked) return;
+        if (touchOnly) return;
         track.setPointerCapture(event.pointerId);
         lastX = event.clientX;
         lastY = event.clientY;
@@ -318,11 +345,15 @@
 
       track.addEventListener("pointermove", (event) => {
         if (gyroLocked) return;
+        if (touchOnly) return;
         if (lastX === null || lastY === null) return;
         const dx = event.clientX - lastX;
         const dy = event.clientY - lastY;
         if (Math.abs(dy) > 1) {
           pendingScroll += dy * scrollScale;
+        }
+        if (Math.abs(dx) > 1) {
+          pendingScrollX += dx * scrollScale;
         }
         lastX = event.clientX;
         lastY = event.clientY;
@@ -332,18 +363,148 @@
       function resetDrag() {
         lastX = null;
         lastY = null;
+        lastTouchX = null;
+        lastTouchY = null;
+        lastTouchScrollY = null;
+        lastTouchScrollX = null;
+        tapStartTime = 0;
+        tapStartX = null;
+        tapStartY = null;
+        tapCanceled = false;
         pendingDx = 0;
         pendingDy = 0;
         pendingScroll = 0;
+        pendingScrollX = 0;
         touchActive = false;
       }
 
-      track.addEventListener("pointerup", resetDrag);
-      track.addEventListener("pointercancel", resetDrag);
-      track.addEventListener("pointerleave", resetDrag);
+      function onPointerEnd(event) {
+        if (touchOnly && event.pointerType === "touch") return;
+        resetDrag();
+      }
 
-      track.addEventListener("click", () => {
-        if (gyroLocked) return;
+      track.addEventListener("pointerup", onPointerEnd);
+      track.addEventListener("pointercancel", onPointerEnd);
+      track.addEventListener("pointerleave", onPointerEnd);
+
+      track.addEventListener(
+        "touchstart",
+        (event) => {
+          if (!touchOnly) return;
+          event.preventDefault();
+          const touches = event.touches;
+          if (touches.length === 1) {
+            const touch = touches[0];
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+            lastTouchScrollY = null;
+            tapStartTime = Date.now();
+            tapStartX = touch.clientX;
+            tapStartY = touch.clientY;
+            tapCanceled = false;
+          } else if (touches.length >= 2) {
+            const avgY = (touches[0].clientY + touches[1].clientY) / 2;
+            const avgX = (touches[0].clientX + touches[1].clientX) / 2;
+            lastTouchScrollY = avgY;
+            lastTouchScrollX = avgX;
+            lastTouchX = null;
+            lastTouchY = null;
+            tapCanceled = true;
+          }
+          touchActive = true;
+          recordActivity();
+        },
+        { passive: false },
+      );
+
+      track.addEventListener(
+        "touchmove",
+        (event) => {
+          if (!touchOnly) return;
+          event.preventDefault();
+          const touches = event.touches;
+          if (
+            touches.length === 1 &&
+            lastTouchX !== null &&
+            lastTouchY !== null
+          ) {
+            const touch = touches[0];
+            const dx = touch.clientX - lastTouchX;
+            const dy = touch.clientY - lastTouchY;
+            pendingDx += dx * moveScale;
+            pendingDy += dy * moveScale;
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+            if (tapStartX !== null && tapStartY !== null && !tapCanceled) {
+              const dist = Math.hypot(
+                touch.clientX - tapStartX,
+                touch.clientY - tapStartY,
+              );
+              if (dist > tapMoveThreshold) {
+                tapCanceled = true;
+              }
+            }
+            recordActivity();
+          } else if (touches.length >= 2) {
+            const avgY = (touches[0].clientY + touches[1].clientY) / 2;
+            const avgX = (touches[0].clientX + touches[1].clientX) / 2;
+            if (lastTouchScrollY !== null && lastTouchScrollX !== null) {
+              const dy = avgY - lastTouchScrollY;
+              const dx = avgX - lastTouchScrollX;
+              pendingScroll += dy * scrollScale;
+              pendingScrollX += dx * scrollScale;
+              recordActivity();
+            }
+            lastTouchScrollY = avgY;
+            lastTouchScrollX = avgX;
+            lastTouchX = null;
+            lastTouchY = null;
+            tapCanceled = true;
+          }
+        },
+        { passive: false },
+      );
+
+      track.addEventListener(
+        "touchend",
+        (event) => {
+          if (!touchOnly) return;
+          const touches = event.touches;
+          if (touches.length === 1) {
+            lastTouchX = touches[0].clientX;
+            lastTouchY = touches[0].clientY;
+            lastTouchScrollY = null;
+          } else if (touches.length >= 2) {
+            lastTouchScrollY = (touches[0].clientY + touches[1].clientY) / 2;
+            lastTouchScrollX = (touches[0].clientX + touches[1].clientX) / 2;
+            lastTouchX = null;
+            lastTouchY = null;
+            tapCanceled = true;
+          } else {
+            if (
+              !tapCanceled &&
+              tapStartTime &&
+              Date.now() - tapStartTime < tapMaxMs
+            ) {
+              triggerClick();
+            }
+            resetDrag();
+          }
+        },
+        { passive: false },
+      );
+
+      track.addEventListener(
+        "touchcancel",
+        () => {
+          if (!touchOnly) return;
+          resetDrag();
+        },
+        { passive: false },
+      );
+
+      function triggerClick() {
+        if (gyroLocked && !touchOnly) return;
         const now = Date.now();
         if (now - lastTap < 250) return;
         lastTap = now;
@@ -353,6 +514,11 @@
         setTimeout(() => {
           touchActive = false;
         }, 150);
+      }
+
+      track.addEventListener("click", () => {
+        if (touchOnly) return;
+        triggerClick();
       });
 
       function flush() {
@@ -362,18 +528,22 @@
           pendingDy = Math.sign(pendingDy) * maxQueue;
         if (Math.abs(pendingScroll) > maxQueue)
           pendingScroll = Math.sign(pendingScroll) * maxQueue;
+        if (Math.abs(pendingScrollX) > maxQueue)
+          pendingScrollX = Math.sign(pendingScrollX) * maxQueue;
         const dx = Math.round(pendingDx);
         const dy = Math.round(pendingDy);
-        const scroll = Math.round(pendingScroll);
+        const scrollY = Math.round(pendingScroll);
+        const scrollX = Math.round(pendingScrollX);
         if (dx !== 0 || dy !== 0) {
           send("move", { dx, dy });
         }
-        if (scroll !== 0) {
-          send("scroll", { dy: scroll });
+        if (scrollX !== 0 || scrollY !== 0) {
+          send("scroll", { dx: scrollX, dy: scrollY });
         }
         pendingDx -= dx;
         pendingDy -= dy;
-        pendingScroll -= scroll;
+        pendingScroll -= scrollY;
+        pendingScrollX -= scrollX;
       }
 
       function updateBias(xRate, yRate) {
@@ -441,6 +611,7 @@
 
       function onMotion(event) {
         if (!gyroEnabled) return;
+        if (touchOnly) return;
         if (touchActive) return;
         const rate = event.rotationRate;
         if (!rate) return;
@@ -474,6 +645,7 @@
 
       function onOrientation(event) {
         if (!gyroEnabled) return;
+        if (touchOnly) return;
         if (touchActive) return;
         if (usingMotion) return;
         if (typeof event.alpha !== "number" || typeof event.beta !== "number")
@@ -533,6 +705,12 @@
 
       async function enableGyro() {
         if (gyroEnabled) return;
+        if (touchOnly) {
+          gyroEnabled = false;
+          gyroBtn.textContent = "Gyro off";
+          showToast("Touch-only mode enabled");
+          return;
+        }
         if (
           typeof DeviceOrientationEvent !== "undefined" &&
           typeof DeviceOrientationEvent.requestPermission === "function"
@@ -585,8 +763,27 @@
         scrollScale = Number(scrollSensInput.value);
         updateSettingsUI();
       });
+
+      touchOnlyInput.addEventListener("change", () => {
+        touchOnly = touchOnlyInput.checked;
+        gyroBtn.disabled = touchOnly;
+        if (touchOnly) {
+          gyroEnabled = false;
+          gyroSeen = false;
+          gyroLocked = false;
+          gyroBtn.textContent = "Gyro off";
+        } else {
+          gyroBtn.textContent = gyroLocked
+            ? "Gyro locked"
+            : gyroEnabled
+              ? "Gyro on"
+              : "Enable gyro";
+        }
+        updateSettingsUI();
+      });
+
       track.addEventListener("pointerdown", () => {
-        if (!gyroEnabled) enableGyro();
+        if (!gyroEnabled && !touchOnly) enableGyro();
       });
       window.addEventListener("blur", resetDrag);
       document.addEventListener("visibilitychange", () => {
