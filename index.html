@@ -8,6 +8,15 @@
     />
     <title>Gyro Mouse</title>
     <link rel="icon" href="/favicon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0b0d12" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="mobile-web-app-capable" content="yes" />
     <style>
       :root {
         --bg: #0b0d12;
@@ -278,7 +287,8 @@
       const maxQueue = 300;
 
       function connect() {
-        const url = `wss://${location.host}/ws`;
+        const scheme = location.protocol === "https:" ? "wss" : "ws";
+        const url = `${scheme}://${location.host}/ws`;
         socket = new WebSocket(url);
 
         socket.addEventListener("open", () => {
@@ -307,6 +317,60 @@
         toast.textContent = message;
         toast.classList.add("show");
         setTimeout(() => toast.classList.remove("show"), duration);
+      }
+
+      const settingsKey = "gyroMouseSettings";
+
+      function loadSettings() {
+        try {
+          const raw = localStorage.getItem(settingsKey);
+          if (!raw) return;
+          const parsed = JSON.parse(raw);
+          if (
+            typeof parsed.gyroGain === "number" &&
+            isFinite(parsed.gyroGain)
+          ) {
+            gyroGain = parsed.gyroGain;
+          }
+          if (
+            typeof parsed.scrollScale === "number" &&
+            isFinite(parsed.scrollScale)
+          ) {
+            scrollScale = parsed.scrollScale;
+          }
+          if (typeof parsed.touchOnly === "boolean") {
+            touchOnly = parsed.touchOnly;
+          }
+        } catch (error) {
+          return;
+        }
+      }
+
+      function saveSettings() {
+        try {
+          localStorage.setItem(
+            settingsKey,
+            JSON.stringify({ gyroGain, scrollScale, touchOnly }),
+          );
+        } catch (error) {
+          return;
+        }
+      }
+
+      function applyTouchOnlyState() {
+        gyroBtn.disabled = touchOnly;
+        if (touchOnly) {
+          gyroEnabled = false;
+          gyroSeen = false;
+          gyroLocked = false;
+          gyroBtn.textContent = "Gyro off";
+        } else {
+          gyroBtn.textContent = gyroLocked
+            ? "Gyro locked"
+            : gyroEnabled
+              ? "Gyro on"
+              : "Enable gyro";
+        }
       }
 
       function updateSettingsUI() {
@@ -757,29 +821,20 @@
       mouseSensInput.addEventListener("input", () => {
         gyroGain = Number(mouseSensInput.value);
         updateSettingsUI();
+        saveSettings();
       });
 
       scrollSensInput.addEventListener("input", () => {
         scrollScale = Number(scrollSensInput.value);
         updateSettingsUI();
+        saveSettings();
       });
 
       touchOnlyInput.addEventListener("change", () => {
         touchOnly = touchOnlyInput.checked;
-        gyroBtn.disabled = touchOnly;
-        if (touchOnly) {
-          gyroEnabled = false;
-          gyroSeen = false;
-          gyroLocked = false;
-          gyroBtn.textContent = "Gyro off";
-        } else {
-          gyroBtn.textContent = gyroLocked
-            ? "Gyro locked"
-            : gyroEnabled
-              ? "Gyro on"
-              : "Enable gyro";
-        }
+        applyTouchOnlyState();
         updateSettingsUI();
+        saveSettings();
       });
 
       track.addEventListener("pointerdown", () => {
@@ -790,6 +845,14 @@
         if (document.hidden) resetDrag();
       });
 
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("/sw.js").catch(() => {});
+        });
+      }
+
+      loadSettings();
+      applyTouchOnlyState();
       updateSettingsUI();
       setInterval(flush, frameMs);
 

@@ -15,8 +15,12 @@ from typing import Dict, Optional
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "index.html")
 FAVICON = os.path.join(HERE, "icon.png")
+ICON_192 = os.path.join(HERE, "icon-192.png")
+ICON_512 = os.path.join(HERE, "icon-512.png")
 SSL_CERT = os.path.join(HERE, "ssl", "cert.pem")
 SSL_KEY = os.path.join(HERE, "ssl", "key.pem")
+MANIFEST = os.path.join(HERE, "manifest.json")
+SW_JS = os.path.join(HERE, "sw.js")
 
 
 logging.basicConfig(
@@ -532,6 +536,14 @@ def serve_client(sock: socket.socket, address: tuple, backend: InputBackend) -> 
             send_file(sock, INDEX_HTML, "text/html; charset=utf-8")
         elif path == "/favicon.png":
             send_file(sock, FAVICON, "image/png")
+        elif path == "/icon-192.png":
+            send_file(sock, ICON_192, "image/png")
+        elif path == "/icon-512.png":
+            send_file(sock, ICON_512, "image/png")
+        elif path == "/manifest.json":
+            send_file(sock, MANIFEST, "application/manifest+json")
+        elif path == "/sw.js":
+            send_file(sock, SW_JS, "application/javascript")
         else:
             send_http(sock, "404 Not Found", {"Content-Length": "0"})
     finally:
@@ -541,40 +553,52 @@ def serve_client(sock: socket.socket, address: tuple, backend: InputBackend) -> 
             pass
 
 
-def serve(host: str, port: int) -> None:
+def serve(host: str, port: int, use_ssl: bool) -> None:
     backend = CoalescingBackend(pick_backend())
     logging.info("starting gyro mouse server")
-    logging.info("serving https on %s:%s", host, port)
+    logging.info("serving %s on %s:%s", "https" if use_ssl else "http", host, port)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
     server.listen(5)
 
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(SSL_CERT, SSL_KEY)
+    if use_ssl:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(SSL_CERT, SSL_KEY)
 
-    with context.wrap_socket(server, server_side=True) as tls_server:
-        while True:
-            try:
-                client_sock, address = tls_server.accept()
-            except ssl.SSLError as exc:
-                logging.warning("ssl handshake failed: %s", exc)
-                continue
-            thread = threading.Thread(
-                target=serve_client,
-                args=(client_sock, address, backend),
-                daemon=True,
-            )
-            thread.start()
+        with context.wrap_socket(server, server_side=True) as tls_server:
+            while True:
+                try:
+                    client_sock, address = tls_server.accept()
+                except ssl.SSLError as exc:
+                    logging.warning("ssl handshake failed: %s", exc)
+                    continue
+                thread = threading.Thread(
+                    target=serve_client,
+                    args=(client_sock, address, backend),
+                    daemon=True,
+                )
+                thread.start()
+        return
+
+    while True:
+        client_sock, address = server.accept()
+        thread = threading.Thread(
+            target=serve_client,
+            args=(client_sock, address, backend),
+            daemon=True,
+        )
+        thread.start()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Gyro mouse server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8443)
+    parser.add_argument("--no-ssl", action="store_true", help="Serve over HTTP")
     args = parser.parse_args()
-    serve(args.host, args.port)
+    serve(args.host, args.port, not args.no_ssl)
 
 
 if __name__ == "__main__":
